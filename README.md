@@ -109,7 +109,7 @@ sudo vim nginx.conf
 
 The top section includes standard settings to set number of connection workers and specify where the NGINX pid file is located.
 
-```bash
+```
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -130,99 +130,100 @@ The server block is where we configure which port to listen on and how big the f
 
 The larger the chunk size, the less strain this will have on your CPU. However, keep in mind the bigger this is, you'll have bigger dropped segements of video chunks if there's poor network connectivity. I've settled on 4096 as a good in-between.
 
+Finally, make sure to include notify_method get. This is important in the subsequent sections regarding authentication with a stream key.
+
 ```
-rtmp {
-	access_log /var/log/nginx/rtmp_access.log;
-	
 	server {
 		listen 1935;
 		chunk_size 4096;
+		notify_method get;
 	}
-}
 ```
 
 The application directive within the server block defines RTMP applications that you can push and pull from for video streams.
 
 In this example, live means that this is a live stream. Recording is turned off, all meta data on this RTMP stream is copied to the client, and we'll notify the clients when initiating the stream.
 ```
-rtmp {
-	access_log /var/log/nginx/rtmp_access.log;
-	
-	server {
-		listen 1935;
-		chunk_size 4096;
-
 		application live {
 			live on;
 			record off;
 			meta copy;
 			publish_notify on;
 		}
-	}
-}
 ```
 
-To be able to view the stream over HTTP(s), use the HLS directive. This isn't necessary for pushing to other streaming platforms, however, it gives you another way of pushing your video streaming to your own website with a video player.
+### Authentication (optional)
+There's a few ways to protect unwanted users from trying to broadcast to your streaming endpoint. You should probably use all 3 them for the most secure connection. Firewall is your first defense. This will be dependent on the cloud provider to put up boundaries on which IP address can access the RTMP port.
 
-Make sure to create the `/mnt/hls` directory before running NGINX with HLS turned on. You can place the HLS segments in any directory you'd like.
+The downside here is if multiple people are trying to push a stream to your server, you'll need to update the firewall to include each IP. You can also create a directive within the application live block to limit to your ip address. This is basically the same thing as a firewall, but filtered at the applicaiton level. You could do both.
 
-Fragment directs NGINX what the duration should be for each video chunk that's temporarily saved. Playlist length is number of video files before deleting old ones.
+Finally, as you'll see below, you can also use a stream key of your own, using url params that is authenticated before running the stream. Using the on_publish directive, NGINX will defer running the stream until a response is given back. 2xx is a success, 4xx or 5xx will error out. Using this, you can limit streaming to those with the key. In the subsequent section, I discuss how to use basic auth within NGINX. You could also use a php script or a more complex script with a database to allow multiple users to authenticate.  
+
+Make sure to use a unique port.
 
 ```
-rtmp {
-	access_log /var/log/nginx/rtmp_access.log;
-	
-	server {
-		listen 1935;
-		chunk_size 4096;
-
 		application live {
 			live on;
 			record off;
 			meta copy;
 			publish_notify on;
 
-			# Turn on HLS
-			hls on;
-			hls_path /mnt/hls/;
-			hls_fragment 2s;
-			hls_playlist_length 60;
+			# Authentication for stream key
+			on_publish http://localhost:{PORT}/auth_publish;
 		}
-	}
-}
 ```
 
 With the NGINX RTMP module, you can rebroadcast a stream to another source. You can do this directly, or use an intermediary with the localhost loopback device.
 
 Here, the live application is pushing the same incoming stream to the twitch, facebook and youtube rtmp applications. These will need to be defined as a seperate application. Another benefit of segmenting these out into seperate applications, is that you could downscale the video stream to a smaller format, or using ffmepg, convert the video into another format specifically for that endpoint.
 
-```
-rtmp {
-	access_log /var/log/nginx/rtmp_access.log;
-	
-	server {
-		listen 1935;
-		chunk_size 4096;
+We are also pushing the stream to the hls application as well for http streaming.
 
+```
 		application live {
 			live on;
 			record off;
 			meta copy;
 			publish_notify on;
 
-			# Turn on HLS
-			hls on;
-			hls_path /mnt/hls/;
-			hls_fragment 2s;
-			hls_playlist_length 60;
+			# Authentication for stream key
+			on_publish http://localhost:{PORT}/auth_publish;
+
+			# Push to HLS app
+			push rtmp://localhost/hls;
 
 			# Push to other sources
 			push rtmp://localhost/twitch;
 			push rtmp://localhost/youtube;
 			push rtmp://localhost/facebook;
 		}
-	}
-}
+```
+
+To be able to view the stream over HTTP(s), use the HLS directive. This isn't necessary for pushing to other streaming platforms, however, it gives you another way of pushing your video streaming to your own website with a video player.
+
+Make sure to create the `/var/www/hls` directory before running NGINX with HLS turned on. You can place the HLS segments in any directory you'd like.
+
+We'll push the rtmp stream to the hls application, and deny playback for all sources. This is the place to create the settings for the hls video fragements.
+
+Fragment directs NGINX what the duration should be for each video chunk that's temporarily saved. Playlist length is number of video files before deleting old ones.
+
+```
+		application hls {
+			live on;
+			record off;
+			meta copy;
+
+			allow publish 127.0.0.1;
+			deny publish all;
+
+			# No RTMP playback
+			deny play all;
+
+			hls on;
+			hls_path /var/www/hls/;
+			hls_fragment 2s;
+			hls_playlist_length 60;
+		}
 ```
 
 Putting everything together, we have the following RTMP directive defined.
@@ -236,35 +237,11 @@ Facebook, however, uses RTMPS. At the time of writing this guide, the NGINX RTMP
 Keep in mind, since NGINX is already listening on port 1935 on localhost, you'll need to use another port for this intermediary stream. Here, I'm using 19350. Again, remember to copy over Facebook's private stream key.
 
 ```
-rtmp {
-	access_log /var/log/nginx/rtmp_access.log;
-	
-	server {
-		listen 1935;
-		chunk_size 4096;
-
-		application live {
-			live on;
-			record off;
-			meta copy;
-			publish_notify on;
-
-			# Turn on HLS
-			hls on;
-			hls_path /mnt/hls/;
-			hls_fragment 2s;
-			hls_playlist_length 60;
-
-			# Push to other sources
-			push rtmp://localhost/twitch;
-			push rtmp://localhost/youtube;
-			push rtmp://localhost/facebook;
-		}
-
 		application twitch {
 			live on;
 			record off;
 			meta copy;
+
 			allow publish 127.0.0.1;
 			deny publish all;
 
@@ -275,6 +252,7 @@ rtmp {
 			live on;
 			record off;
 			meta copy;
+
 			allow publish 127.0.0.1;
 			deny publish all;
 
@@ -285,6 +263,83 @@ rtmp {
 			live on;
 			record off;
 			meta copy;
+			allow publish 127.0.0.1;
+			deny publish all;
+
+			push rtmp://127.0.0.1:19350/rtmp/{FACEBOOK_STREAM_KEY};
+		}
+```
+
+Putting everything together, our RTMP directive looks like this:
+
+```
+rtmp {
+	access_log /var/log/nginx/rtmp_access.log;
+	
+	server {
+		listen 1935;
+		chunk_size 4096;
+		notify_method get;
+
+		application live {
+			live on;
+			record off;
+			meta copy;
+			publish_notify on;
+
+			# Authentication for stream key
+			on_publish http://localhost:{PORT}/auth_publish;
+
+			# Push to HLS app
+			push rtmp://localhost/hls;
+
+			# Push to other sources
+			push rtmp://localhost/twitch;
+			push rtmp://localhost/youtube;
+			push rtmp://localhost/facebook;
+		}
+
+		application hls {
+			live on;
+			record off;
+			meta copy;
+
+			allow publish 127.0.0.1;
+			deny publish all;
+
+			hls on;
+			hls_path /var/www/hls;
+			hls_fragment 2s;
+			hls_playlist_length 60;
+		}
+
+		application twitch {
+			live on;
+			record off;
+			meta copy;
+
+			allow publish 127.0.0.1;
+			deny publish all;
+
+			push rtmp://live.twitch.tv/app/{TWITCH_STREAM_KEY};
+		}
+
+		application youtube {
+			live on;
+			record off;
+			meta copy;
+
+			allow publish 127.0.0.1;
+			deny publish all;
+
+			push rtmp://a.rtmp.youtube.com/live2/{YOUTUBE_STREAM_KEY};
+		}
+
+		application facebook {
+			live on;
+			record off;
+			meta copy;
+			
 			allow publish 127.0.0.1;
 			deny publish all;
 
@@ -310,40 +365,44 @@ http {
 }
 ```
 
-The server block, similar to the rtmp directive let's us specify what port NGINX should listen to, the server name and many other settings NGINX give you. We'll use port 80 for HTTP. At some point, I'll update this guide to include HTTPS for encrypted web traffic.
+The server block, similar to the rtmp directive let's us specify what port NGINX should listen to, the server name and many other settings NGINX gives you. 
+
+The first server block we'll dive into is that for the rtmp authenitcation. Here, we are listening to a unique port, that's different from HTTP. We are only allowing connections on localhost and have setup a /auth_publish endpoint. You'll want to update the string to match the stream key you specify in your streaming software. 
+
+If the streamkey matches, the directive will return 200 (ok), otherwise return a 404 (not found).
+
+```
+	server {
+	 	listen {PORT};
+
+	 	allow 127.0.0.1;
+	 	deny all;
+
+	 	location /auth_publish {
+	    	if ($arg_streamkey = 'SECRET_STREAM_KEY') {
+	        	return 200;
+	    	}
+
+	    	return 404;
+		}
+	}
+```
+
+For the http server part, we'll use port 80. At some point, I'll update this guide to include HTTPS for encrypted web traffic.
 
 Make sure to update the server_name directive to the domain you expect to route your traffic to. You can use _ to accept all connections.
 
 ```
-http {
-	sendfile on;
-	tcp_nopush on;
-	tcp_nodelay on;
-	keepalive_timeout 65;
-	types_hash_max_size 2048;
-
-	include /etc/nginx/mime.types;
-
 	server {
 		listen 80;
 		listen [::]:80;
 		server_name example.com;
 	}
-}
 ```
 
 Next, we'll define where the index.html file will load from. I've seperated this from the hls directory, as this was causing issues with the content type being sent back to the browser. `/var/www/html` is a common location for hosting websites. The location directive is what defines a path for the webserver. The root directive tells nginx where the root of the application is, and the index tells nginx which file to server for loading that path.
 
 ```
-http {
-	sendfile on;
-	tcp_nopush on;
-	tcp_nodelay on;
-	keepalive_timeout 65;
-	types_hash_max_size 2048;
-
-	include /etc/nginx/mime.types;
-
 	server {
 		listen 80;
 		listen [::]:80;
@@ -354,18 +413,17 @@ http {
 		    index  index.html index.htm;
 		}
 	}
-}
 ```
 
 To load the HLS video segments, we'll need to define where to load those files. Remember that directory we defined earlier for the chunk file sizes? We'll point the webserver to load those files here.
 
-A few things to understand. Types defines what type of video files are being served. The root directive tells nginx where to find the video files. Don't use `root /mnt/hls` as this will cause an error. Sine you are specifying the location /hls, NGINX will append this to the `root /mnt` path.
+A few things to understand. Types defines what type of video files are being served. The root directive tells nginx where to find the video files. Don't use `root /var/www/hls` as this will cause an error. Sine you are specifying the location /hls, NGINX will append this to the `root /var/www` path.
 
 Make sure not to cache any video files, otherwise the browser will try to load old video segments. 
 
 We need to specify a few options with Cross Domain Origin settings or CORS. This allows the video to be loaded from various domains. If you only want your video stream accessible by the domain loading the html file, turn off the CORS settings.
 
-All-in-all, this the entire http server directive that will serve the html file for the video stream.
+All-in-all, this is the entire http  directive that will serve the html file for the video stream and authenticate for the RTMP stream.
 
 ```
 http {
@@ -376,6 +434,21 @@ http {
 	types_hash_max_size 2048;
 
 	include /etc/nginx/mime.types;
+
+	server {
+	 	listen {PORT};
+
+	 	allow 127.0.0.1;
+	 	deny all;
+
+	 	location /auth_publish {
+	    	if ($arg_streamkey = 'SECRET_STREAM_KEY') {
+	        	return 200;
+	    	}
+
+	    	return 404;
+		}
+	}
 
 	server {
 		listen 80;
@@ -393,7 +466,8 @@ http {
 		        application/vnd.apple.mpegurl m3u8;
 		        video/mp2t ts;
 		    }
-		    root /mnt;
+
+		    root /var/www;
 		    add_header Cache-Control no-cache;
 
 		    # CORS setup
@@ -451,7 +525,7 @@ To restart stunnel, run the following command
 sudo service stunnel4 start
 ```
 
-If you get an error, it may be because you ran the service with the 1935 port defined, which would already be in use by NGINX.
+If you get an error here, it may be because you ran the service with the 1935 port defined, which would already be in use by NGINX.
 
 ## Verifying your Connection
 After restaring nginx and stunnel, you can double check that the process are running, ie:
@@ -483,10 +557,15 @@ With OBS, go to Settings, then Stream. Choose custom for the service option. You
 rtmp://server-ip-goes-here/live
 ```
 
-For the Stream Key, you can use whatever value you want here. Since you are pushing the stream key to the server and no one else, it's not as sensitive as the stream keys from the other platforms. From a vulenarability perspective, if you leave port 1935 open to the entire world, then anyone could push video streams to your server, and it would be re-broadcasted to other platforms.
+For the Stream Key, you can use whatever value you want here. If you are using the http auth, then include the following:
+```
+stream_name?streamkey=SECRET_STREAM_KEY
+```
 
-This is why it's important to limit port 1935 to the ip address of your local network, so only you can push to this endpoint.
+The stream name will be the same value that's used to get the HLS video data in the html file that's loaded for the video player.
 
-Further, with the stream key that you use in OBS, this will be the same value that's used to get the HLS video data in the html file that's loaded for the video player.
+If you are the only one pushing the stream key to the server and no one else, just make sure you have the right firewall settings to restrict incoming rtmp stream on port 1935. Coupled with a stream key, this will keep things locked down.
+
+Note: If you get this point with OBS, you are using the streamkey authentication and it's not connecting, double check your RTMP directive block and that you have `notify_method get;` set. By default, nginx will use HTTP POST. Which will move the url parameters off the url and will screw up the subsequent location block when trying to check if the stream key is correct.
 
 If all is working properly, you'll be able to broadcast your live stream to several endpoints at the same time, as well as load the stream directly on a webpage. Pretty cool, huh!?
