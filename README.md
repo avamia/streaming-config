@@ -215,8 +215,6 @@ Fragment directs NGINX what the duration should be for each video chunk that's t
 
 			allow publish 127.0.0.1;
 			deny publish all;
-
-			# No RTMP playback
 			deny play all;
 
 			hls on;
@@ -306,6 +304,7 @@ rtmp {
 
 			allow publish 127.0.0.1;
 			deny publish all;
+			deny play all;
 
 			hls on;
 			hls_path /var/www/hls;
